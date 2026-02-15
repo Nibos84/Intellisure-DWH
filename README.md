@@ -123,10 +123,8 @@ python main.py --manifest manifests/rechtspraak.yaml --env dev
 
 ## 📚 Documentation
 
-- **[Functional Documentation](brain/functional_documentation.md)** - What the system does (user guide)
-- **[Technical Documentation](brain/technical_documentation.md)** - How it works (architecture, code)
-- **[Implementation Plan](brain/implementation_plan.md)** - Development roadmap
-- **[Walkthrough](brain/walkthrough.md)** - What we built and tested
+- **[Functional Documentation](docs/functional_documentation.md)** - What the system does (user guide)
+- **[Technical Documentation](docs/technical_documentation.md)** - How it works (architecture, code)
 
 ---
 

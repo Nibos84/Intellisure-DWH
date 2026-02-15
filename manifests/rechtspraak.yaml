@@ -1,0 +1,21 @@
+pipeline_name: "rechtspraak_daily"
+agent_type: "generic_rest_api"
+
+source:
+  url: "https://data.rechtspraak.nl/uitspraken/zoeken"
+  method: "GET"
+  format: "xml"
+  pagination:
+    type: "offset_limit"
+    offset_param: "from"
+    limit_param: "max"
+    limit_value: 20  # Keep small for initial test
+    max_items: 60     # Safety limit for POC
+  params:
+    return: "DOC"
+
+target:
+  bucket: "splendid-bethe"
+  layer: "landing"
+  source: "rechtspraak"
+  dataset: "uitspraken"

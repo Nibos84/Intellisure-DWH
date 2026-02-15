@@ -1,0 +1,18 @@
+pipeline_name: "rechtspraak_silver_ai"
+agent_type: "generic_ai_transformer"
+
+source:
+  bucket: "splendid-bethe"
+  path: "layer=landing/source=rechtspraak/dataset=uitspraken"
+
+target:
+  bucket: "splendid-bethe"
+  path: "layer=silver/source=rechtspraak/dataset=uitspraken"
+
+ai_config:
+  instruction: "Extract the ECLI, date (YYYY-MM-DD), title, and a short summary (1-2 sentences) from the XML content. Return a list of JSON objects."
+  schema:
+    ecli: "string"
+    date: "string"
+    title: "string"
+    summary: "string"

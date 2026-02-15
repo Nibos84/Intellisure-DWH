@@ -20,7 +20,8 @@ class AppConfig(BaseModel):
     ovh_region: str
     ovh_access_key: str
     ovh_secret_key: str
-
+    llm_model: str = "gpt-3.5-turbo"
+    
     @property
     def is_dev(self) -> bool:
         return self.env in (Environment.LOCAL, Environment.DEV)
@@ -30,23 +31,29 @@ class AppConfig(BaseModel):
         return self.env == Environment.PRD
 
 def get_config() -> AppConfig:
+    def get_bucket_name(env: Environment) -> str:
+        if env == Environment.PRD:
+            return os.getenv("DATA_LAKE_BUCKET_PRD", os.getenv("DATA_LAKE_BUCKET", "default-bucket"))
+        # Default to DEV bucket for local/dev
+        return os.getenv("DATA_LAKE_BUCKET_DEV", os.getenv("DATA_LAKE_BUCKET", "default-bucket-dev"))
+
     env_str = os.getenv("ENV", "local").lower()
     
-    # Validation of env specific variables could be added here
     try:
-        env = Environment(env_str)
+        env_enum = Environment(env_str)
     except ValueError:
         logging.warning(f"Invalid ENV '{env_str}', defaulting to LOCAL")
-        env = Environment.LOCAL
+        env_enum = Environment.LOCAL
         
     return AppConfig(
-        env=env,
+        env=env_enum,
         log_level=os.getenv("LOG_LEVEL", "INFO"),
-        bucket_name=os.getenv("DATA_LAKE_BUCKET", "default-bucket"),
+        bucket_name=get_bucket_name(env_enum),
         ovh_endpoint=os.getenv("OVH_ENDPOINT_URL", ""),
         ovh_access_key=os.getenv("OVH_ACCESS_KEY", ""),
         ovh_secret_key=os.getenv("OVH_SECRET_KEY", ""),
         ovh_region=os.getenv("OVH_REGION_NAME", "rbx"),
+        llm_model=os.getenv("LLM_MODEL", "gpt-3.5-turbo"),
     )
 
 # Singleton instance
@@ -56,4 +63,8 @@ config = get_config()
 logging.basicConfig(
     level=getattr(logging, config.log_level.upper()),
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    handlers=[
+        logging.FileHandler("app.log"),
+        logging.StreamHandler()
+    ]
 )

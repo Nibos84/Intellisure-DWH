@@ -1,117 +1,117 @@
 import logging
-import requests
-import json
-from typing import Dict, Any, Optional, List
-from datetime import datetime
+import subprocess
+import os
+import sys
+import re
+from typing import Dict, Any, Optional
 from src.agents.mas.base_role import AgentRole
-from src.core.s3_manager import s3_manager
+from src.core.config import config
 
 logger = logging.getLogger(__name__)
 
 class IngestionSpecialistAgent(AgentRole):
     """
-    Reasoning-based data ingestion agent.
-    Uses LLM to adapt to API quirks and handle errors intelligently.
+    Code-generating data ingestion agent.
+    Generates and executes Python scripts to ingest data from external sources.
     """
     def __init__(self):
         super().__init__(
             name="Ingestion Specialist",
             role="Data Ingestion Expert",
-            goal="Fetch data from external sources and store it in the data lake with intelligent error handling and adaptation."
+            goal="Generate and execute robust Python scripts to ingest data from external sources into the data lake."
         )
-        self.system_prompt += (
-            "\nAdditional Instructions:\n"
-            "- You are responsible for fetching data from REST APIs.\n"
-            "- Analyze API responses and adapt your strategy (pagination, rate limiting, error recovery).\n"
-            "- When you encounter errors, reason about the cause and suggest solutions.\n"
-            "- You have access to tools: fetch_url, save_to_s3, analyze_response.\n"
-            "- Always respond with your reasoning and the action you're taking."
+        self.system_prompt = (
+            "You are an expert Data Engineer specializing in building robust data ingestion pipelines.\n"
+            "Your goal is to write Python scripts that fetch data from APIs and store it in S3.\n"
+            "The scripts must be production-ready: handle pagination, rate limiting, retries, and errors gracefully.\n"
+            "You must output ONLY the Python code within a ```python block.\n"
+            "Do NOT provide explanations or commentary outside the code block."
         )
         
     def execute(self, manifest: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Execute the ingestion pipeline based on the manifest.
-        Uses LLM reasoning to adapt to API behavior.
+        Execute the ingestion pipeline by generating and running a script.
         """
         pipeline_name = manifest.get("pipeline_name", "unknown")
-        source_config = manifest.get("source", {})
-        target_config = manifest.get("target", {})
+        logger.info(f"[{self.name}] Starting ingestion for: {pipeline_name}")
         
-        logger.info(f"[{self.name}] Starting ingestion: {pipeline_name}")
+        # 1. Generate the ingestion script
+        script_content = self._generate_script(manifest)
+        if not script_content:
+            return {"status": "failed", "error": "Failed to generate script"}
+            
+        # 2. Save script to file
+        script_path = f"ingest_{pipeline_name}.py"
+        with open(script_path, "w") as f:
+            f.write(script_content)
+
+        logger.info(f"[{self.name}] Generated script saved to {script_path}")
         
-        # Ask LLM to analyze the task
-        task_description = (
-            f"I need to ingest data from this source:\n"
-            f"URL: {source_config.get('url')}\n"
-            f"Method: {source_config.get('method', 'GET')}\n"
-            f"Format: {source_config.get('format', 'json')}\n"
-            f"Pagination: {source_config.get('pagination', {})}\n\n"
-            f"What strategy should I use? What potential issues should I watch for?"
-        )
-        
-        strategy = self.chat(task_description)
-        logger.info(f"[{self.name}] Strategy: {strategy}")
-        
-        # Execute ingestion with LLM-guided approach
+        # 3. Execute the script with environment variables for secrets
+        env_vars = os.environ.copy()
+        env_vars.update({
+            "PYTHONPATH": os.getcwd(),
+            "OVH_ENDPOINT": config.ovh_endpoint,
+            "OVH_REGION": config.ovh_region,
+            "OVH_ACCESS_KEY": config.ovh_access_key,
+            "OVH_SECRET_KEY": config.ovh_secret_key,
+        })
+
         try:
-            data = self._fetch_data(source_config, strategy)
-            self._save_data(data, target_config, pipeline_name)
-            
-            return {"status": "success", "records": len(data)}
-        except Exception as e:
-            # Ask LLM for error recovery
-            error_analysis = self.chat(
-                f"I encountered this error: {str(e)}\n"
-                f"What should I do? Should I retry? Adjust parameters?"
+            result = subprocess.run(
+                [sys.executable, script_path],
+                capture_output=True,
+                text=True,
+                check=True,
+                env=env_vars
             )
-            logger.error(f"[{self.name}] Error analysis: {error_analysis}")
-            return {"status": "failed", "error": str(e), "analysis": error_analysis}
-    
-    def _fetch_data(self, source_config: Dict, strategy: str) -> List[Dict]:
-        """Fetch data from the source."""
-        url = source_config.get("url")
-        method = source_config.get("method", "GET")
-        
-        response = requests.request(method, url)
-        response.raise_for_status()
-        
-        data = response.json()
-        
-        # Handle different response structures
-        if isinstance(data, dict):
-            # Ask LLM which key contains the actual data
-            analysis = self.chat(
-                f"The API returned a dict with these keys: {list(data.keys())}.\n"
-                f"Which key likely contains the data records?"
-            )
-            logger.info(f"[{self.name}] Data extraction guidance: {analysis}")
+            logger.info(f"[{self.name}] Execution successful:\n{result.stdout}")
+            return {"status": "success", "output": result.stdout}
             
-            # Simple heuristic: look for common keys
-            for key in ['data', 'results', 'items', 'records']:
-                if key in data:
-                    data = data[key]
-                    break
+        except subprocess.CalledProcessError as e:
+            logger.error(f"[{self.name}] Execution failed:\n{e.stderr}")
+            # Optional: Implement feedback loop here to fix the script
+            return {"status": "failed", "error": e.stderr}
+        finally:
+            # Cleanup
+            if os.path.exists(script_path):
+                os.remove(script_path)
+
+    def _generate_script(self, manifest: Dict[str, Any]) -> Optional[str]:
+        """Prompts the LLM to generate the Python ingestion script."""
+        source = manifest.get("source", {})
+        target = manifest.get("target", {})
         
-        return data if isinstance(data, list) else [data]
-    
-    def _save_data(self, data: List[Dict], target_config: Dict, pipeline_name: str):
-        """Save data to S3."""
-        bucket = target_config.get("bucket")
-        layer = target_config.get("layer", "landing")
-        source = target_config.get("source", "unknown")
-        dataset = target_config.get("dataset", "data")
-        
-        # Hive-style partitioning
-        now = datetime.now()
-        partition_path = (
-            f"layer={layer}/source={source}/dataset={dataset}/"
-            f"year={now.year}/month={now.month:02d}/day={now.day:02d}"
+        prompt = (
+            f"Write a standalone Python script to ingest data based on this configuration:\n\n"
+            f"SOURCE:\n"
+            f"- URL: {source.get('url')}\n"
+            f"- Method: {source.get('method', 'GET')}\n"
+            f"- Format: {source.get('format', 'json')}\n"
+            f"- Pagination: {source.get('pagination', {})}\n\n"
+            f"TARGET S3 CONFIG:\n"
+            f"- Bucket: {target.get('bucket', config.bucket_name)}\n"
+            f"- Base Path: layer={target.get('layer', 'landing')}/source={target.get('source', 'unknown')}/dataset={target.get('dataset', 'data')}\n\n"
+            "REQUIREMENTS:\n"
+            "1. Use `requests` to fetch data. Handle pagination automatically.\n"
+            "2. Use `boto3` to upload data to S3. \n"
+            "   - Initialize boto3 client using `os.environ` variables: OVH_ENDPOINT, OVH_REGION, OVH_ACCESS_KEY, OVH_SECRET_KEY.\n"
+            "   - Create partitioned path: {Base Path}/year=YYYY/month=MM/day=DD/batch_{timestamp}.json\n"
+            "3. Implement retry logic for network requests.\n"
+            "4. Print JSON logs to stdout for monitoring.\n"
+            "5. The script must be self-contained (import os, sys, requests, boto3, etc).\n"
+            "6. Handle errors and exit with non-zero status code on failure.\n"
         )
         
-        filename = f"batch_{now.strftime('%Y%m%d%H%M%S')}.json"
-        s3_key = f"{partition_path}/{filename}"
+        response = self.chat(prompt)
         
-        content = json.dumps(data, indent=2).encode('utf-8')
-        s3_manager.write_file(s3_key, content)
+        # Extract code block
+        match = re.search(r"```python\n(.*?)\n```", response, re.DOTALL)
+        if match:
+            return match.group(1)
         
-        logger.info(f"[{self.name}] Saved {len(data)} records to {s3_key}")
+        # Fallback if no block found but code looks present
+        if "import requests" in response:
+             return response.replace("```python", "").replace("```", "")
+
+        return None

@@ -1,36 +1,38 @@
 import logging
 import json
+import subprocess
+import os
+import sys
+import re
 from typing import Dict, Any, List, Optional
 from src.agents.mas.base_role import AgentRole
 from src.core.s3_manager import s3_manager
-from src.core.ai_service import ai_service
+from src.core.config import config
 
 logger = logging.getLogger(__name__)
 
 class TransformationSpecialistAgent(AgentRole):
     """
-    Reasoning-based data transformation agent.
-    Uses LLM to understand data patterns and transform intelligently.
+    Code-generating transformation agent.
+    Generates and executes Python scripts (using Pandas) to transform data.
     """
     def __init__(self):
         super().__init__(
             name="Transformation Specialist",
             role="Data Transformation Expert",
-            goal="Transform raw data into structured, clean formats using intelligent reasoning and schema inference."
+            goal="Generate and execute efficient Python scripts using Pandas to transform raw data into clean, structured formats."
         )
-        self.system_prompt += (
-            "\nAdditional Instructions:\n"
-            "- You are responsible for transforming raw data (JSON, XML, CSV) into clean, structured formats.\n"
-            "- Analyze data quality and adapt your transformation strategy.\n"
-            "- Infer schemas when not explicitly provided.\n"
-            "- Handle missing, corrupt, or inconsistent data intelligently.\n"
-            "- Always explain your reasoning and the transformations you're applying."
+        self.system_prompt = (
+            "You are an expert Data Engineer specializing in data transformation using Python and Pandas.\n"
+            "Your goal is to write efficient scripts that read data from S3, apply transformations, and write back to S3.\n"
+            "The scripts must handle data quality issues, enforce schemas, and work with large datasets.\n"
+            "You must output ONLY the Python code within a ```python block.\n"
+            "Do NOT provide explanations or commentary outside the code block."
         )
         
     def execute(self, manifest: Dict[str, Any]) -> Dict[str, Any]:
         """
-        Execute the transformation pipeline based on the manifest.
-        Uses LLM reasoning to adapt transformation strategy.
+        Execute the transformation pipeline by generating and running a script.
         """
         pipeline_name = manifest.get("pipeline_name", "unknown")
         source_config = manifest.get("source", {})
@@ -39,84 +41,117 @@ class TransformationSpecialistAgent(AgentRole):
         
         logger.info(f"[{self.name}] Starting transformation: {pipeline_name}")
         
-        # Get source files
+        # 1. Get sample data for context
         source_path = source_config.get("path", "")
-        files = s3_manager.list_files(source_path)
+        sample_data = self._get_sample_data(source_path)
         
-        if not files:
-            logger.warning(f"[{self.name}] No files found in {source_path}")
+        if not sample_data:
+            logger.warning(f"[{self.name}] No data found in {source_path}")
             return {"status": "no_data"}
+
+        # 2. Generate the transformation script
+        script_content = self._generate_script(manifest, sample_data)
+        if not script_content:
+            return {"status": "failed", "error": "Failed to generate script"}
+
+        # 3. Save script to file
+        script_path = f"transform_{pipeline_name}.py"
+        with open(script_path, "w") as f:
+            f.write(script_content)
+
+        logger.info(f"[{self.name}] Generated script saved to {script_path}")
         
-        # Ask LLM for transformation strategy
-        strategy_prompt = (
-            f"I need to transform data with this goal:\n"
-            f"Instruction: {ai_config.get('instruction', 'Transform to structured format')}\n"
-            f"Target Schema: {ai_config.get('schema', 'Not specified - infer from data')}\n"
-            f"Number of files: {len(files)}\n\n"
-            f"What transformation strategy should I use? What quality checks should I perform?"
-        )
-        
-        strategy = self.chat(strategy_prompt)
-        logger.info(f"[{self.name}] Strategy: {strategy}")
-        
-        # Process files
-        processed_count = 0
-        for file_key in files[:3]:  # Limit for demo
-            try:
-                self._transform_file(file_key, ai_config, target_config)
-                processed_count += 1
-            except Exception as e:
-                # Ask LLM for error handling
-                error_guidance = self.chat(
-                    f"Error transforming {file_key}: {str(e)}\n"
-                    f"Should I skip this file or try a different approach?"
-                )
-                logger.error(f"[{self.name}] Error guidance: {error_guidance}")
-        
-        return {"status": "success", "processed": processed_count, "total": len(files)}
-    
-    def _transform_file(self, file_key: str, ai_config: Dict, target_config: Dict):
-        """Transform a single file using LLM reasoning."""
-        # Read source data
-        content_bytes = s3_manager.read_file(file_key)
-        if not content_bytes:
-            return
+        # 4. Execute the script
+        env_vars = os.environ.copy()
+        env_vars.update({
+            "PYTHONPATH": os.getcwd(),
+            "OVH_ENDPOINT": config.ovh_endpoint,
+            "OVH_REGION": config.ovh_region,
+            "OVH_ACCESS_KEY": config.ovh_access_key,
+            "OVH_SECRET_KEY": config.ovh_secret_key,
+        })
         
         try:
-            raw_text = content_bytes.decode('utf-8')
+            # Pass sample_data or file list if needed, but script should handle listing
+            result = subprocess.run(
+                [sys.executable, script_path],
+                capture_output=True,
+                text=True,
+                check=True,
+                env=env_vars
+            )
+            logger.info(f"[{self.name}] Execution successful:\n{result.stdout}")
+            return {"status": "success", "output": result.stdout}
+
+        except subprocess.CalledProcessError as e:
+            logger.error(f"[{self.name}] Execution failed:\n{e.stderr}")
+            # Optional: Implement feedback loop here
+            return {"status": "failed", "error": e.stderr}
+        finally:
+            if os.path.exists(script_path):
+                os.remove(script_path)
+    
+    def _get_sample_data(self, source_path: str) -> Optional[str]:
+        """Reads a sample of the first file in the source path."""
+        files = s3_manager.list_files(source_path)
+        if not files:
+            return None
+
+        first_file = files[0]
+        content = s3_manager.read_file(first_file)
+        if not content:
+            return None
+
+        try:
+            text = content.decode('utf-8')
+            return text[:5000] # Return first 5KB
         except UnicodeDecodeError:
-            raw_text = str(content_bytes)
+            return str(content)[:5000]
+
+    def _generate_script(self, manifest: Dict[str, Any], sample_data: str) -> Optional[str]:
+        """Prompts the LLM to generate the Python transformation script."""
+        source = manifest.get("source", {})
+        target = manifest.get("target", {})
+        ai_config = manifest.get("ai_config", {})
         
-        logger.info(f"[{self.name}] Transforming {file_key} (size: {len(raw_text)} chars)")
-        
-        # Use AI to transform
-        instruction = ai_config.get('instruction', 'Extract structured data')
-        target_schema = ai_config.get('schema', {})
-        
-        # Ask LLM to transform the data
-        transform_prompt = (
-            f"Transform this data according to the instruction.\n\n"
-            f"Instruction: {instruction}\n"
-            f"Target Schema: {json.dumps(target_schema, indent=2)}\n\n"
-            f"Raw Data (first 5000 chars):\n{raw_text[:5000]}\n\n"
-            f"Return ONLY a valid JSON array of objects matching the schema."
+        prompt = (
+            f"Write a standalone Python script to transform data based on this configuration:\n\n"
+            f"SOURCE S3:\n"
+            f"- Path Prefix: {source.get('path')}\n"
+            f"- Bucket: {source.get('bucket', config.bucket_name)}\n"
+            f"TARGET S3:\n"
+            f"- Path Prefix: {target.get('path')}\n"
+            f"- Bucket: {target.get('bucket', config.bucket_name)}\n"
+            f"S3 CONFIG:\n"
+            f"- Endpoint: Read from env OVH_ENDPOINT\n"
+            f"- Region: Read from env OVH_REGION\n"
+            f"- Access Key: Read from env OVH_ACCESS_KEY\n"
+            f"- Secret Key: Read from env OVH_SECRET_KEY\n\n"
+            f"TRANSFORMATION INSTRUCTION: {ai_config.get('instruction')}\n"
+            f"TARGET SCHEMA: {json.dumps(ai_config.get('schema'), indent=2)}\n\n"
+            f"SAMPLE SOURCE DATA (First 5KB):\n{sample_data}\n\n"
+            "REQUIREMENTS:\n"
+            "1. Use `boto3` to list all files in the source prefix.\n"
+            "2. For each file:\n"
+            "   a. Download it locally (or read into memory).\n"
+            "   b. Load into a Pandas DataFrame (infer format from extension or content).\n"
+            "   c. Apply transformations to match the schema and instruction.\n"
+            "   d. Convert data types if necessary (e.g., date strings to datetime objects).\n"
+            "   e. Write the result to the target path (change extension to .parquet or .json).\n"
+            "   f. Use `boto3` to upload the result.\n"
+            "   - Initialize boto3 client using `os.environ` variables: OVH_ENDPOINT, OVH_REGION, OVH_ACCESS_KEY, OVH_SECRET_KEY.\n"
+            "3. Handle errors gracefully (skip bad files and log errors).\n"
+            "4. Print summary logs (processed count, error count).\n"
+            "5. The script must be self-contained.\n"
         )
         
-        transformed_data = ai_service.transform_data(
-            raw_text[:10000],  # Limit context
-            target_schema,
-            instruction
-        )
+        response = self.chat(prompt)
         
-        if not transformed_data:
-            logger.warning(f"[{self.name}] No data extracted from {file_key}")
-            return
-        
-        # Save transformed data
-        target_path = target_config.get("path", "layer=silver")
-        output_key = file_key.replace("layer=landing", target_path).replace(".xml", ".json").replace(".csv", ".json")
-        
-        output_content = json.dumps(transformed_data, indent=2).encode('utf-8')
-        s3_manager.write_file(output_key, output_content)
-        
-        logger.info(f"[{self.name}] Saved {len(transformed_data)} records to {output_key}")
+        match = re.search(r"```python\n(.*?)\n```", response, re.DOTALL)
+        if match:
+            return match.group(1)
+
+        if "import pandas" in response:
+             return response.replace("```python", "").replace("```", "")
+
+        return None

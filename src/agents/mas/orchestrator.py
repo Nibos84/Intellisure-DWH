@@ -70,7 +70,7 @@ target:
   dataset: "data"
 ```
 
-YAML TEMPLATE FOR TRANSFORMATION:
+YAML TEMPLATE FOR TRANSFORMATION (PYTHON PANDAS GENERATION):
 ```yaml
 pipeline_name: "source_silver_ai"
 agent_type: "generic_ai_transformer"
@@ -81,10 +81,11 @@ target:
   bucket: "splendid-bethe"
   path: "layer=silver/source=example/dataset=data"
 ai_config:
-  instruction: "Extract fields X, Y, Z"
+  instruction: "Clean data, standardize dates to YYYY-MM-DD, drop duplicates"
   schema:
-    field1: string
-    field2: number
+    field1: str
+    field2: float
+    date_field: datetime64[ns]
 ```
 """
         

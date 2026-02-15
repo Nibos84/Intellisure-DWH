@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 class AIService:
     """
     Manages interactions with OpenAI (LLM).
-    Uses the configured model (default: o1-mini) for reasoning.
+    Uses the configured model (default: gpt-3.5-turbo) for reasoning.
     """
     def __init__(self):
         self.client = OpenAI() # Specs API Key from env automatically
@@ -33,23 +33,14 @@ class AIService:
         user_prompt = f"Instruction: {instruction}\n\nRaw Data:\n{raw_content[:20000]}" # Limit context window just in case
         
         try:
-            # For o1-mini/preview, 'system' role might not be fully supported or behaves differently.
-            # But standard ChatCompletions API usually accepts it. 
-            # If o1-mini is reasoning model, it might have specific constraints.
-            # We'll use standard structure first.
-            
-            # NOTE: o1-preview/mini currently supports 'user' messages primarily for reasoning. 
-            # System prompt support varies. We will combine into user prompt if needed.
-            # For robust fallback, let's keep it simple.
-            
             messages = [
-                {"role": "user", "content": f"{system_prompt}\n\n{user_prompt}"}
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
             ]
 
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=messages,
-                # response_format={"type": "json_object"} # o1-mini might not support json_mode yet
+                messages=messages
             )
             
             content = response.choices[0].message.content
@@ -75,5 +66,94 @@ class AIService:
         except Exception as e:
             logger.error(f"AI Transformation failed: {e}")
             return []
+
+    def generate_config(self, instruction: str, schema: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """
+        Generates a configuration object based on an instruction and schema.
+        Use this for creating Manifests from natural language.
+        """
+        schema_json = json.dumps(schema, indent=2)
+        system_prompt = (
+            "You are a Senior Data Architect. "
+            "Your goal is to generate a valid configuration (JSON) based on the user's request. "
+            "Use the provided schema as a strict guide.\n"
+            f"Schema:\n{schema_json}\n"
+            "Output ONLY valid JSON (a single object). No markdown, no explanations."
+        )
+        
+        try:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": instruction}
+            ]
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages
+            )
+            
+            content = response.choices[0].message.content
+            
+            if content.startswith("```json"):
+                content = content.replace("```json", "").replace("```", "")
+            elif content.startswith("```"):
+                content = content.replace("```", "")
+                
+            return json.loads(content)
+            
+        except Exception as e:
+            logger.error(f"AI Config Generation failed: {e}")
+            return None
+
+    def generate_plan(self, instruction: str) -> str:
+        """
+        Generates a natural language implementation plan based on the user request.
+        Acts as a consultant/architect.
+        """
+        system_prompt = (
+            "You are a Senior Data Architect. "
+            "Your goal is to analyze the user's request and propose a technical implementation plan. "
+            "Do NOT generate code or JSON yet. just explain your approach.\n"
+            "Structure your response:\n"
+            "1. **Understanding**: What is the user asking?\n"
+            "2. **Research/Assumptions**: What API/Source will you use? (Simulate knowledge of common APIs like KNMI, Rechtspraak, etc.)\n"
+            "3. **Proposed Plan**: How will you ingest and transform this data?\n"
+            "4. **Confirmation**: Ask if this plan is acceptable."
+        )
+        
+        try:
+            messages = [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": instruction}
+            ]
+
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages
+            )
+            
+            return response.choices[0].message.content
+            
+        except Exception as e:
+            logger.error(f"AI Plan Generation failed: {e}")
+            return "Could not generate a plan due to an error."
+
+    def chat(self, messages: List[Dict[str, str]]) -> str:
+        """
+        Generic chat completion for conversational agents.
+        Args:
+            messages: List of message dicts (role, content)
+        Returns:
+            The assistant's response content.
+        """
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=messages
+            )
+            return response.choices[0].message.content
+        except Exception as e:
+            logger.error(f"AI Chat failed: {e}")
+            return f"Error: {str(e)}"
 
 ai_service = AIService()

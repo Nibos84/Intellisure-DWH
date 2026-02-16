@@ -123,10 +123,15 @@ This platform is designed for **public data sources only**. Private networks, lo
    - `192.168.0.0/16` (Class C: `192.168.x.x`)
 
 3. **No Link-Local & Reserved IPs:**
-   - `169.254.0.0/16` (Link-local)
+   - `169.254.0.0/16` (Link-local IPv4)
+   - `fe80::/10` (Link-local IPv6)
    - Other reserved IP ranges
 
-4. **No Private Hostnames:**
+4. **No IPv6 Unique Local Addresses (ULA):**
+   - `fc00::/7` (IPv6 ULA - private IPv6 addresses)
+   - Addresses starting with `fc` or `fd` are rejected
+
+5. **No Private Hostnames:**
    - Hostnames containing `internal`, `corp`, `intranet` are rejected
    - Hostnames ending in `.local`, `.lan` are rejected
 

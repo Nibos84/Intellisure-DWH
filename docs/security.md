@@ -189,9 +189,22 @@ pytest tests/test_execution_timeouts.py -v
 ```
 
 **Limitations:**
-- Unix/Linux only (uses SIGALRM)
-- Does not work on Windows
-- Cannot interrupt system calls that don't check for signals
+- **Cross-Platform:** Works on Windows, Unix/Linux, macOS via `subprocess.run(timeout=...)`
+- **Signal-based timeout (Unix/Linux only):** Additional safety layer using `signal.SIGALRM`
+- **Windows:** Signal-based timeout is disabled (not supported), relies solely on subprocess timeout
+
+**Platform-Specific Behavior:**
+
+| Platform | Subprocess Timeout | Signal Timeout | Total Protection |
+|----------|-------------------|----------------|------------------|
+| Windows  | ✅ Yes            | ❌ No (N/A)    | ✅ Full          |
+| Unix/Linux | ✅ Yes          | ✅ Yes (extra) | ✅ Full + Extra  |
+| macOS    | ✅ Yes            | ✅ Yes (extra) | ✅ Full + Extra  |
+
+**Why Dual Timeout?**
+- `subprocess.run(timeout=...)` is the **primary** cross-platform timeout
+- `signal.SIGALRM` (Unix/Linux) provides **additional** safety if subprocess timeout fails
+- Both layers ensure scripts cannot run indefinitely
 
 ---
 

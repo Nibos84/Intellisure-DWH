@@ -88,18 +88,23 @@ def test_windows_time_limit_is_noop():
     # time_limit should not raise on Windows, even with long-running code
     # The timeout is handled by subprocess.run() timeout parameter
     start = time.time()
+    timeout_seconds = 2
     try:
         with time_limit(1):  # This is a no-op on Windows
             # This will timeout via subprocess, not time_limit
             subprocess.run(
                 [sys.executable, '-c', 'import time; time.sleep(5)'],
-                timeout=2,  # subprocess timeout will kick in
+                timeout=timeout_seconds,  # subprocess timeout will kick in
                 capture_output=True
             )
     except subprocess.TimeoutExpired:
         # Expected: subprocess timeout, not TimeoutException
         elapsed = time.time() - start
-        assert 1.5 < elapsed < 3, f"Expected ~2s timeout, got {elapsed}s"
+        # Allow 0.5s margin before timeout for process startup, 1s after for cleanup
+        min_elapsed = timeout_seconds - 0.5
+        max_elapsed = timeout_seconds + 1
+        assert min_elapsed < elapsed < max_elapsed, \
+            f"Expected ~{timeout_seconds}s timeout (±0.5-1s margin), got {elapsed:.2f}s"
     except TimeoutException:
         pytest.fail("time_limit should be no-op on Windows, not raise TimeoutException")
 

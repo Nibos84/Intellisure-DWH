@@ -280,23 +280,15 @@ def test_url_validation_allows_public_ipv6():
     valid_urls = [
         "http://[2001:4860:4860::8888]/api",  # Google Public DNS
         "http://[2606:4700:4700::1111]/data", # Cloudflare DNS
-        "http://[2001:db8::1]/endpoint",      # Documentation prefix (but not reserved for private use)
     ]
     
     for url in valid_urls:
-        # Note: 2001:db8::/32 is reserved for documentation, but ipaddress module
-        # doesn't flag it as private/reserved in the same way as RFC 1918 addresses.
-        # We'll test it anyway to ensure our validation isn't overly restrictive.
-        try:
-            validated = validate_manifest({
-                "pipeline_name": "test",
-                "agent_type": "generic_rest_api",
-                "source": {"url": url, "method": "GET"},
-                "target": {"bucket": "test", "layer": "landing", "source": "test", "dataset": "data"}
-            })
-            # If validation succeeds, ensure URL is preserved
-            assert validated.source.url is not None
-        except ValidationError as e:
-            # If 2001:db8:: is blocked as reserved, that's acceptable security posture
-            if "2001:db8" not in url:
-                raise  # Other addresses must not be blocked
+        # These are real public IPv6 addresses that should be allowed
+        validated = validate_manifest({
+            "pipeline_name": "test",
+            "agent_type": "generic_rest_api",
+            "source": {"url": url, "method": "GET"},
+            "target": {"bucket": "test", "layer": "landing", "source": "test", "dataset": "data"}
+        })
+        # Validation should succeed for public IPv6 addresses
+        assert validated.source.url is not None

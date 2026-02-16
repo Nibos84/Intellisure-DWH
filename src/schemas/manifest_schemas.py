@@ -112,7 +112,8 @@ class SourceConfig(BaseModel):
             raise ValueError("URL must have a valid hostname")
         
         # Block localhost variants
-        if hostname.lower() in ['localhost', '127.0.0.1', '::1', '0.0.0.0']:
+        localhost_variants = ['localhost', '127.0.0.1', '::1', '0.0.0.0', '::ffff:127.0.0.1']
+        if hostname.lower() in localhost_variants:
             raise ValueError(
                 f"Localhost URLs not allowed: {hostname}. "
                 f"This platform is for public data sources only."
@@ -124,13 +125,24 @@ class SourceConfig(BaseModel):
             ip = ipaddress.ip_address(hostname)
             is_ip_address = True
             
-            # Block private IP ranges
+            # Block private, loopback, link-local, and reserved IPs (IPv4 and IPv6)
             if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                ip_type = "IPv6" if ip.version == 6 else "IPv4"
                 raise ValueError(
-                    f"Private/reserved IP address not allowed: {hostname}. "
+                    f"Private/reserved {ip_type} address not allowed: {hostname}. "
                     f"This platform is for public data sources only. "
                     f"Use public domain names instead."
                 )
+            
+            # Additional IPv6 checks for Unique Local Addresses (ULA)
+            if ip.version == 6:
+                # fc00::/7 - Unique Local Addresses
+                if str(ip).startswith(('fc', 'fd')):
+                    raise ValueError(
+                        f"Private IPv6 address (ULA) not allowed: {hostname}. "
+                        f"This platform is for public data sources only."
+                    )
+                
         except ValueError as e:
             # Check if this is our validation error (contains "not allowed")
             # or an ipaddress parsing error (hostname is not an IP)

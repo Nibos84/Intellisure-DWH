@@ -78,19 +78,26 @@ class TransformationSpecialistAgent(AgentRole):
         })
         
         try:
-            # Pass sample_data or file list if needed, but script should handle listing
+            # Use subprocess timeout for cross-platform compatibility
+            # time_limit provides additional safety on Unix/Linux
             with time_limit(config.script_execution_timeout):
                 result = subprocess.run(
                     [sys.executable, script_path],
                     capture_output=True,
                     text=True,
                     check=True,
+                    timeout=config.script_execution_timeout,  # Cross-platform timeout
                     env=env_vars
                 )
             logger.info(f"[{self.name}] Execution successful:\n{result.stdout}")
             return {"status": "success", "output": result.stdout}
 
+        except subprocess.TimeoutExpired as e:
+            logger.error(f"[{self.name}] Script execution timed out after {config.script_execution_timeout}s")
+            return {"status": "failed", "error": "Script execution timed out"}
+
         except TimeoutException as e:
+            # Unix/Linux signal-based timeout
             logger.error(f"[{self.name}] {str(e)}")
             return {"status": "failed", "error": "Script execution timed out"}
 

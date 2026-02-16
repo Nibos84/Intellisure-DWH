@@ -64,6 +64,33 @@ The system consists of **5 AI agents** working together:
 
 ---
 
+## 🔒 Security Features
+
+### Code Validation & Sandboxing
+
+All LLM-generated scripts are validated before execution:
+
+- **AST-based Analysis**: Parses code without executing it
+- **Dangerous Import Blocking**: Prevents `os.system`, `subprocess`, `eval`, `exec`, `socket`, `pickle`
+- **Safe Import Allowlist**: Permits `pandas`, `boto3`, `requests`, `json`, `datetime`
+- **Retry Logic**: Up to 3 attempts with LLM feedback for invalid code
+- **Syntax Validation**: Catches syntax errors before execution
+
+**Example:**
+```python
+# ❌ This code is BLOCKED
+import os
+os.system("rm -rf /")
+
+# ✅ This code is ALLOWED
+import pandas as pd
+df = pd.DataFrame({'a': [1, 2, 3]})
+```
+
+See [Security Documentation](docs/security.md) for details.
+
+---
+
 ## 📁 Project Structure
 
 ```
@@ -76,11 +103,19 @@ data_engineering_agents/
 │   │       ├── orchestrator.py     # Workflow coordinator
 │   │       ├── ingestion_specialist.py
 │   │       └── transformation_specialist.py
-│   └── core/
-│       ├── ai_service.py           # OpenAI wrapper
-│       ├── config.py               # Configuration
-│       ├── runner.py               # Pipeline executor
-│       └── s3_manager.py           # S3 operations
+│   ├── core/
+│   │   ├── ai_service.py           # OpenAI wrapper
+│   │   ├── config.py               # Configuration
+│   │   ├── runner.py               # Pipeline executor
+│   │   └── s3_manager.py           # S3 operations
+│   └── security/
+│       └── code_validator.py       # 🔒 Code validation
+├── docs/
+│   ├── security.md                 # Security documentation
+│   ├── functional_documentation.md
+│   └── technical_documentation.md
+├── tests/
+│   └── test_code_validator.py      # Security tests
 ├── manifests/                      # Generated YAML configs
 ├── interact.py                     # Interactive CLI
 ├── main.py                         # Direct manifest runner
@@ -125,6 +160,8 @@ python main.py --manifest manifests/rechtspraak.yaml --env dev
 
 - **[Functional Documentation](docs/functional_documentation.md)** - What the system does (user guide)
 - **[Technical Documentation](docs/technical_documentation.md)** - How it works (architecture, code)
+- **[Security Documentation](docs/security.md)** - Security features and best practices
+- **[Validation Documentation](docs/validation.md)** - Input validation schemas and rules
 
 ---
 

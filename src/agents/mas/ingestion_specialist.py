@@ -6,6 +6,7 @@ import re
 from typing import Dict, Any, Optional
 from src.agents.mas.base_role import AgentRole
 from src.core.config import config
+from src.security.code_validator import CodeValidator
 
 logger = logging.getLogger(__name__)
 
@@ -20,12 +21,16 @@ class IngestionSpecialistAgent(AgentRole):
             role="Data Ingestion Expert",
             goal="Generate and execute robust Python scripts to ingest data from external sources into the data lake."
         )
+        self.validator = CodeValidator()
+        self.max_retries = 3
         self.system_prompt = (
             "You are an expert Data Engineer specializing in building robust data ingestion pipelines.\n"
             "Your goal is to write Python scripts that fetch data from APIs and store it in S3.\n"
             "The scripts must be production-ready: handle pagination, rate limiting, retries, and errors gracefully.\n"
             "You must output ONLY the Python code within a ```python block.\n"
-            "Do NOT provide explanations or commentary outside the code block."
+            "Do NOT provide explanations or commentary outside the code block.\n"
+            "IMPORTANT: Only use safe imports (pandas, boto3, requests, json, datetime). "
+            "Do NOT use os.system, subprocess, eval, exec, or other dangerous functions."
         )
         
     def execute(self, manifest: Dict[str, Any]) -> Dict[str, Any]:
@@ -35,10 +40,10 @@ class IngestionSpecialistAgent(AgentRole):
         pipeline_name = manifest.get("pipeline_name", "unknown")
         logger.info(f"[{self.name}] Starting ingestion for: {pipeline_name}")
         
-        # 1. Generate the ingestion script
-        script_content = self._generate_script(manifest)
+        # 1. Generate and validate the ingestion script (with retries)
+        script_content = self._generate_and_validate_script(manifest)
         if not script_content:
-            return {"status": "failed", "error": "Failed to generate script"}
+            return {"status": "failed", "error": "Failed to generate valid script after retries"}
             
         # 2. Save script to file
         script_path = f"ingest_{pipeline_name}.py"
@@ -77,6 +82,43 @@ class IngestionSpecialistAgent(AgentRole):
             if os.path.exists(script_path):
                 os.remove(script_path)
 
+    def _generate_and_validate_script(self, manifest: Dict[str, Any]) -> Optional[str]:
+        """Generate script with validation and retry logic."""
+        for attempt in range(self.max_retries):
+            logger.info(f"[{self.name}] Script generation attempt {attempt + 1}/{self.max_retries}")
+            
+            # Generate script
+            script_content = self._generate_script(manifest)
+            if not script_content:
+                logger.warning(f"[{self.name}] Failed to extract code from LLM response")
+                continue
+            
+            # Validate script
+            is_valid, error_msg, suggestions = self.validator.validate(script_content)
+            
+            if is_valid:
+                logger.info(f"[{self.name}] ✅ Script validation passed")
+                return script_content
+            
+            # Validation failed - provide feedback to LLM
+            logger.warning(f"[{self.name}] ❌ Script validation failed: {error_msg}")
+            
+            if attempt < self.max_retries - 1:
+                # Retry with feedback
+                feedback = (
+                    f"The previous script had validation errors:\n"
+                    f"ERROR: {error_msg}\n\n"
+                    f"SUGGESTIONS:\n" + "\n".join(f"- {s}" for s in suggestions) + "\n\n"
+                    f"Please generate a corrected version that fixes these issues."
+                )
+                logger.info(f"[{self.name}] Retrying with feedback to LLM")
+                # Add feedback to history for next attempt
+                self.history.append({"role": "user", "content": feedback})
+            else:
+                logger.error(f"[{self.name}] Max retries reached. Validation report:\n{self.validator.get_validation_report()}")
+        
+        return None
+    
     def _generate_script(self, manifest: Dict[str, Any]) -> Optional[str]:
         """Prompts the LLM to generate the Python ingestion script."""
         source = manifest.get("source", {})
@@ -101,6 +143,7 @@ class IngestionSpecialistAgent(AgentRole):
             "4. Print JSON logs to stdout for monitoring.\n"
             "5. The script must be self-contained (import os, sys, requests, boto3, etc).\n"
             "6. Handle errors and exit with non-zero status code on failure.\n"
+            "7. SECURITY: Only use safe imports. Do NOT use os.system, subprocess.Popen, eval, exec, or __import__.\n"
         )
         
         response = self.chat(prompt)

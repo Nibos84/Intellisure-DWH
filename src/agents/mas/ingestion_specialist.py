@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional
 from src.agents.mas.base_role import AgentRole
 from src.core.config import config
 from src.security.code_validator import CodeValidator
+from src.utils.execution import time_limit, TimeoutException
 
 logger = logging.getLogger(__name__)
 
@@ -63,15 +64,20 @@ class IngestionSpecialistAgent(AgentRole):
         })
 
         try:
-            result = subprocess.run(
-                [sys.executable, script_path],
-                capture_output=True,
-                text=True,
-                check=True,
-                env=env_vars
-            )
+            with time_limit(config.script_execution_timeout):
+                result = subprocess.run(
+                    [sys.executable, script_path],
+                    capture_output=True,
+                    text=True,
+                    check=True,
+                    env=env_vars
+                )
             logger.info(f"[{self.name}] Execution successful:\n{result.stdout}")
             return {"status": "success", "output": result.stdout}
+            
+        except TimeoutException as e:
+            logger.error(f"[{self.name}] {str(e)}")
+            return {"status": "failed", "error": "Script execution timed out"}
             
         except subprocess.CalledProcessError as e:
             logger.error(f"[{self.name}] Execution failed:\n{e.stderr}")

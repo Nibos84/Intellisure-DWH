@@ -21,6 +21,7 @@ class AppConfig(BaseModel):
     ovh_access_key: str
     ovh_secret_key: str
     llm_model: str = "gpt-3.5-turbo"
+    script_execution_timeout: int = 300
     
     @property
     def is_dev(self) -> bool:
@@ -54,6 +55,7 @@ def get_config() -> AppConfig:
         ovh_secret_key=os.getenv("OVH_SECRET_KEY", ""),
         ovh_region=os.getenv("OVH_REGION_NAME", "rbx"),
         llm_model=os.getenv("LLM_MODEL", "gpt-3.5-turbo"),
+        script_execution_timeout=int(os.getenv("SCRIPT_EXECUTION_TIMEOUT", "300")),
     )
 
 # Singleton instance

@@ -9,6 +9,8 @@ Validates YAML manifest files for data pipelines to ensure:
 """
 
 import re
+import ipaddress
+from urllib.parse import urlparse
 from typing import Optional, Dict, Any, Literal
 from pydantic import BaseModel, Field, field_validator, HttpUrl, ConfigDict
 import logging
@@ -93,6 +95,60 @@ class SourceConfig(BaseModel):
         # Ensure path doesn't start with /
         if v.startswith('/'):
             raise ValueError("S3 path should not start with /")
+        
+        return v
+    
+    @field_validator('url')
+    @classmethod
+    def validate_public_url(cls, v):
+        """Ensure URL points to public internet, not private networks."""
+        if not v:
+            return v
+        
+        parsed = urlparse(str(v))
+        hostname = parsed.hostname
+        
+        if not hostname:
+            raise ValueError("URL must have a valid hostname")
+        
+        # Block localhost variants
+        if hostname.lower() in ['localhost', '127.0.0.1', '::1', '0.0.0.0']:
+            raise ValueError(
+                f"Localhost URLs not allowed: {hostname}. "
+                f"This platform is for public data sources only."
+            )
+        
+        # Check if hostname is an IP address
+        try:
+            ip = ipaddress.ip_address(hostname)
+            
+            # Block private IP ranges
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                raise ValueError(
+                    f"Private/reserved IP address not allowed: {hostname}. "
+                    f"This platform is for public data sources only. "
+                    f"Use public domain names instead."
+                )
+        except ValueError:
+            # Not an IP address, it's a hostname - that's fine
+            pass
+        
+        # Additional check: block common private hostnames
+        private_hostname_patterns = [
+            'internal',
+            'corp',
+            'intranet',
+            '.local',
+            '.lan',
+        ]
+        
+        hostname_lower = hostname.lower()
+        for pattern in private_hostname_patterns:
+            if pattern in hostname_lower:
+                raise ValueError(
+                    f"Private hostname pattern detected: {hostname}. "
+                    f"This platform is for public data sources only."
+                )
         
         return v
 

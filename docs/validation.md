@@ -105,19 +105,78 @@ bucket: "my..bucket"          # Consecutive periods
 ```
 
 ### URLs
-**Validation:** Pydantic `HttpUrl` type
 
-**Valid:**
+**Validation:** Pydantic `HttpUrl` type + Public URL validator
+
+#### URL Security Validation
+
+This platform is designed for **public data sources only**. Private networks, localhost, and internal services are blocked to prevent SSRF (Server-Side Request Forgery) attacks and unauthorized access to internal resources.
+
+**Validation Rules:**
+
+1. **No Localhost:**
+   - `localhost`, `127.0.0.1`, `::1`, `0.0.0.0` are rejected
+
+2. **No Private IPs (RFC 1918):**
+   - `10.0.0.0/8` (Class A: `10.x.x.x`)
+   - `172.16.0.0/12` (Class B: `172.16.x.x` - `172.31.x.x`)
+   - `192.168.0.0/16` (Class C: `192.168.x.x`)
+
+3. **No Link-Local & Reserved IPs:**
+   - `169.254.0.0/16` (Link-local)
+   - Other reserved IP ranges
+
+4. **No Private Hostnames:**
+   - Hostnames containing `internal`, `corp`, `intranet` are rejected
+   - Hostnames ending in `.local`, `.lan` are rejected
+
+**Valid (Public URLs):**
 ```yaml
-url: "https://api.example.com/data"
-url: "http://localhost:8000/api"
+url: "https://api.data.gov/api/v1/data"      ✅
+url: "https://opendata.cbs.nl/ODataApi"      ✅
+url: "https://dummyjson.com/products"        ✅
+url: "https://example.com/api"               ✅
 ```
 
-**Invalid:**
+**Invalid (Private/Local URLs):**
 ```yaml
-url: "not-a-url"
-url: "ftp://example.com"      # Only HTTP(S) allowed
+url: "http://localhost:8080"                 ❌ Localhost
+url: "http://127.0.0.1/api"                  ❌ Loopback IP
+url: "http://192.168.1.1/api"                ❌ Private IP
+url: "http://10.0.0.1/data"                  ❌ Private IP
+url: "http://internal.company.com/api"       ❌ Private hostname
+url: "http://server.local/api"               ❌ Private hostname
+url: "not-a-url"                             ❌ Invalid format
+url: "ftp://example.com"                     ❌ Only HTTP(S) allowed
 ```
+
+**Error Messages:**
+
+```
+❌ source -> url: Localhost URLs not allowed: localhost. 
+   This platform is for public data sources only.
+
+❌ source -> url: Private/reserved IP address not allowed: 192.168.1.1. 
+   This platform is for public data sources only. Use public domain names instead.
+
+❌ source -> url: Private hostname pattern detected: internal.company.com. 
+   This platform is for public data sources only.
+```
+
+**Why This Restriction?**
+
+This platform is designed as a **public data ingestion service**. Allowing private network access would:
+- Enable attackers to scan internal networks (SSRF)
+- Allow access to sensitive internal services
+- Bypass firewall protections
+- Create security vulnerabilities
+
+**Need to Ingest from Private Networks?**
+
+For private data sources, consider:
+1. Using a VPN or secure tunnel to make the service publicly accessible
+2. Deploying a dedicated instance within your private network
+3. Using API gateways that expose private services securely
 
 ### Pagination
 **Types:** `offset`, `offset_limit`, `cursor`, `page`, `none`

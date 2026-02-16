@@ -140,6 +140,153 @@ SUGGESTIONS:
 
 ---
 
+## Resource Exhaustion Protection
+
+### Execution Timeouts
+
+**Implementation:** `src/utils/execution.py`, `src/agents/mas/ingestion_specialist.py`, `src/agents/mas/transformation_specialist.py`
+
+**Purpose:** Prevent runaway scripts from consuming excessive resources.
+
+**Mechanism:**
+- Python `signal.alarm()` based timeout
+- Default: 300 seconds (5 minutes)
+- Configurable via `SCRIPT_EXECUTION_TIMEOUT` environment variable
+
+**Example:**
+```python
+from src.utils.execution import time_limit, TimeoutException
+
+try:
+    with time_limit(300):
+        result = subprocess.run([sys.executable, script_path])
+except TimeoutException as e:
+    logger.error(f"Script execution timed out")
+    return {"status": "failed", "error": "Script execution timed out"}
+```
+
+**What Happens on Timeout:**
+1. Script process receives SIGALRM signal
+2. `TimeoutException` is raised
+3. Agent returns `{"status": "failed", "error": "Script execution timed out"}`
+4. User is notified via logs
+
+**Why 5 Minutes?**
+- Sufficient for most public API ingestions
+- Prevents infinite loops
+- Protects against memory bombs
+- Balances between functionality and safety
+
+**Configuration:**
+```bash
+# .env
+SCRIPT_EXECUTION_TIMEOUT=300  # seconds
+```
+
+**Testing:**
+```bash
+pytest tests/test_execution_timeouts.py -v
+```
+
+**Limitations:**
+- Unix/Linux only (uses SIGALRM)
+- Does not work on Windows
+- Cannot interrupt system calls that don't check for signals
+
+---
+
+## Network Access Control
+
+### Public-Only URL Validation
+
+**Implementation:** `src/schemas/manifest_schemas.py` - `SourceConfig.validate_public_url()`
+
+**Purpose:** Ensure data sources are publicly accessible, preventing:
+- Access to internal services
+- Private network scanning
+- Localhost exploitation
+- Server-Side Request Forgery (SSRF) attacks
+
+**Blocked URL Patterns:**
+
+1. **Localhost:**
+   - `localhost`, `127.0.0.1`, `::1`, `0.0.0.0`
+
+2. **Private IP Ranges (RFC 1918):**
+   - `10.0.0.0/8` (Class A private network)
+   - `172.16.0.0/12` (Class B private network)
+   - `192.168.0.0/16` (Class C private network)
+
+3. **Special Use IPs:**
+   - `169.254.0.0/16` (Link-local addresses)
+   - Reserved ranges
+   - Loopback addresses
+
+4. **Private Hostname Patterns:**
+   - Contains: `internal`, `corp`, `intranet`
+   - Ends with: `.local`, `.lan`
+
+**Examples:**
+
+✅ **Allowed:**
+```yaml
+source:
+  url: "https://api.data.gov/api/v1/data"
+  url: "https://opendata.cbs.nl/ODataApi/odata"
+  url: "https://dummyjson.com/products"
+  url: "https://example.com/api"
+```
+
+❌ **Blocked:**
+```yaml
+source:
+  url: "http://localhost:8080/api"          # Localhost
+  url: "http://192.168.1.1/data"           # Private IP
+  url: "http://10.0.0.1/secret"            # Private IP
+  url: "http://internal.company.com/api"   # Private hostname
+```
+
+**Error Messages:**
+```
+❌ Manifest validation failed:
+  • source -> url: Localhost URLs not allowed: localhost. 
+    This platform is for public data sources only.
+
+❌ Manifest validation failed:
+  • source -> url: Private/reserved IP address not allowed: 192.168.1.1. 
+    This platform is for public data sources only. Use public domain names instead.
+
+❌ Manifest validation failed:
+  • source -> url: Private hostname pattern detected: internal.company.com. 
+    This platform is for public data sources only.
+```
+
+**Testing:**
+```bash
+pytest tests/test_manifest_schemas.py::test_url_validation_blocks_localhost -v
+pytest tests/test_manifest_schemas.py::test_url_validation_blocks_private_ips -v
+pytest tests/test_manifest_schemas.py::test_url_validation_blocks_private_hostnames -v
+pytest tests/test_manifest_schemas.py::test_url_validation_allows_public_urls -v
+```
+
+**Known Limitations:**
+
+⚠️ **DNS Rebinding Attacks:**
+- Attacker could use DNS that resolves to private IP after validation
+- **Current Mitigation:** None
+- **Recommendation:** Re-validate hostname at request time (future enhancement)
+
+⚠️ **URL Redirects:**
+- Public URL could redirect to private IP
+- **Current Mitigation:** None
+- **Recommendation:** Disable redirects in requests library (future enhancement)
+
+⚠️ **IPv6 Private Addresses:**
+- Only basic IPv6 localhost blocking implemented
+- **Recommendation:** Add comprehensive IPv6 private range checking
+
+---
+
 ## Best Practices
 
 ### For Developers
@@ -197,8 +344,9 @@ SUGGESTIONS:
 | System command execution | Import blocking | ✅ Implemented |
 | Data exfiltration via network | Socket blocking | ✅ Implemented |
 | Arbitrary code execution | eval/exec blocking | ✅ Implemented |
+| Resource exhaustion | Execution timeouts | ✅ Implemented |
+| Private network access | URL validation | ✅ Implemented |
 | Credential theft | (Planned) Secrets management | ⏳ Pending |
-| Resource exhaustion | (Planned) Resource limits | ⏳ Pending |
 
 ### Residual Risks
 
@@ -206,11 +354,15 @@ SUGGESTIONS:
    - **Mitigation:** Validator catches most dangerous patterns
    - **Recommendation:** Implement prompt sanitization
 
-2. **Resource Exhaustion:** Generated code could consume excessive memory/CPU
+2. **DNS Rebinding:** URL could resolve to private IP after validation
    - **Mitigation:** None (currently)
-   - **Recommendation:** Implement resource limits (Docker, cgroups)
+   - **Recommendation:** Re-validate hostname at request time
 
-3. **Logic Bugs:** Generated code could have business logic errors
+3. **URL Redirects:** Public URL could redirect to private IP
+   - **Mitigation:** None (currently)
+   - **Recommendation:** Disable redirects in requests library
+
+4. **Logic Bugs:** Generated code could have business logic errors
    - **Mitigation:** None (currently)
    - **Recommendation:** Add data quality validation
 

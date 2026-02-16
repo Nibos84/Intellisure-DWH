@@ -87,6 +87,21 @@ import pandas as pd
 df = pd.DataFrame({'a': [1, 2, 3]})
 ```
 
+### Network Access Control
+
+- **URL Validation**: Blocks access to private networks and localhost
+  - Prevents SSRF (Server-Side Request Forgery) attacks
+  - Blocks localhost, private IP ranges (10.x.x.x, 192.168.x.x, 172.16-31.x.x)
+  - Blocks private hostname patterns (internal, corp, intranet, .local, .lan)
+  - Only allows public data sources
+
+### Resource Protection
+
+- **Execution Timeouts**: Scripts are killed after 5 minutes (configurable)
+  - Prevents infinite loops and resource exhaustion
+  - Protects against memory bombs
+  - Configurable via `SCRIPT_EXECUTION_TIMEOUT` environment variable
+
 See [Security Documentation](docs/security.md) for details.
 
 ---

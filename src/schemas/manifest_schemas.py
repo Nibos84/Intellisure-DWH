@@ -119,8 +119,10 @@ class SourceConfig(BaseModel):
             )
         
         # Check if hostname is an IP address
+        is_ip_address = False
         try:
             ip = ipaddress.ip_address(hostname)
+            is_ip_address = True
             
             # Block private IP ranges
             if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
@@ -130,28 +132,32 @@ class SourceConfig(BaseModel):
                     f"Use public domain names instead."
                 )
         except ValueError as e:
-            # If it's our validation error, re-raise it
-            if "not allowed" in str(e):
+            # Check if this is our validation error (contains "not allowed")
+            # or an ipaddress parsing error (hostname is not an IP)
+            error_msg = str(e)
+            if "not allowed" in error_msg or "platform is for public" in error_msg:
+                # This is our validation error, re-raise it
                 raise
-            # Otherwise it's not an IP address, it's a hostname - that's fine
+            # Otherwise, hostname is not an IP address - continue to hostname checks
             pass
         
-        # Additional check: block common private hostnames
-        private_hostname_patterns = [
-            'internal',
-            'corp',
-            'intranet',
-            '.local',
-            '.lan',
-        ]
-        
-        hostname_lower = hostname.lower()
-        for pattern in private_hostname_patterns:
-            if pattern in hostname_lower:
-                raise ValueError(
-                    f"Private hostname pattern detected: {hostname}. "
-                    f"This platform is for public data sources only."
-                )
+        # Additional check: block common private hostnames (only if not an IP)
+        if not is_ip_address:
+            private_hostname_patterns = [
+                'internal',
+                'corp',
+                'intranet',
+                '.local',
+                '.lan',
+            ]
+            
+            hostname_lower = hostname.lower()
+            for pattern in private_hostname_patterns:
+                if pattern in hostname_lower:
+                    raise ValueError(
+                        f"Private hostname pattern detected: {hostname}. "
+                        f"This platform is for public data sources only."
+                    )
         
         return v
 

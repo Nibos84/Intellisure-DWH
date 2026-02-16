@@ -36,6 +36,13 @@ def time_limit(seconds: int) -> Generator[None, None, None]:
         consider using threading.Timer or multiprocessing with timeout.
     """
     def signal_handler(signum, frame):
+        """
+        Signal handler for SIGALRM.
+        
+        Args:
+            signum: Signal number (required by signal.signal interface)
+            frame: Current stack frame (required by signal.signal interface)
+        """
         raise TimeoutException(f"Execution timed out after {seconds} seconds")
     
     # Set the signal handler and a timeout alarm

@@ -28,8 +28,9 @@ dist/
 .coverage
 htmlcov/
 
-# Test files and temporary data
-test_*.py
+# Test files and temporary data (but not in tests/ directory)
+/test_*.py
+!tests/test_*.py
 debug*.txt
 *.log
 manifests/mas_*.yaml

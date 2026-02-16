@@ -131,7 +131,15 @@ This platform is designed for **public data sources only**. Private networks, lo
    - `fc00::/7` (IPv6 ULA - private IPv6 addresses)
    - Addresses starting with `fc` or `fd` are rejected
 
-5. **No Private Hostnames:**
+5. **No Multicast Addresses:**
+   - IPv4 multicast: `224.0.0.0/4` (Class D: `224.x.x.x` - `239.x.x.x`)
+   - IPv6 multicast: `ff00::/8` (addresses starting with `ff`)
+
+6. **No IPv4-Mapped IPv6 Private Addresses:**
+   - `::ffff:10.0.0.0/8`, `::ffff:172.16.0.0/12`, `::ffff:192.168.0.0/16`
+   - IPv4-mapped IPv6 addresses that resolve to private IPv4 ranges
+
+7. **No Private Hostnames:**
    - Hostnames containing `internal`, `corp`, `intranet` are rejected
    - Hostnames ending in `.local`, `.lan` are rejected
 

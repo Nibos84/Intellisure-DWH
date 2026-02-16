@@ -125,8 +125,8 @@ class SourceConfig(BaseModel):
             ip = ipaddress.ip_address(hostname)
             is_ip_address = True
             
-            # Block private, loopback, link-local, and reserved IPs (IPv4 and IPv6)
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            # Block private, loopback, link-local, multicast, and reserved IPs (IPv4 and IPv6)
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved or ip.is_multicast:
                 ip_type = "IPv6" if ip.version == 6 else "IPv4"
                 raise ValueError(
                     f"Private/reserved {ip_type} address not allowed: {hostname}. "

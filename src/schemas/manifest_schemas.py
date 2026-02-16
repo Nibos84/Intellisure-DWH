@@ -129,8 +129,11 @@ class SourceConfig(BaseModel):
                     f"This platform is for public data sources only. "
                     f"Use public domain names instead."
                 )
-        except ValueError:
-            # Not an IP address, it's a hostname - that's fine
+        except ValueError as e:
+            # If it's our validation error, re-raise it
+            if "not allowed" in str(e):
+                raise
+            # Otherwise it's not an IP address, it's a hostname - that's fine
             pass
         
         # Additional check: block common private hostnames

@@ -4,13 +4,15 @@ import subprocess
 import os
 import sys
 import re
+import ast
 from typing import Dict, Any, List, Optional
 from src.agents.mas.base_role import AgentRole
-from src.core.s3_manager import s3_manager
 from src.core.config import config
+from src.storage.s3_manager import S3Manager
 from src.security.code_validator import CodeValidator
 from src.security.s3_credential_service import S3CredentialService
 from src.utils.execution import time_limit, TimeoutException
+from src.utils.script_cache import get_script_cache
 
 logger = logging.getLogger(__name__)
 
@@ -48,25 +50,49 @@ class TransformationSpecialistAgent(AgentRole):
         
         logger.info(f"[{self.name}] Starting transformation: {pipeline_name}")
         
-        # 1. Get sample data for context
-        source_path = source_config.get("path", "")
-        sample_data = self._get_sample_data(source_path)
-        
+        # 1. Get sample data from source
+        sample_data = self._get_sample_data(manifest)
         if not sample_data:
-            logger.warning(f"[{self.name}] No data found in {source_path}")
-            return {"status": "no_data"}
+            return {"status": "failed", "error": "Failed to retrieve sample data"}
+        
+        # 2. Check cache first
+        cache = get_script_cache()
+        cached_script = cache.get(manifest)
+        
+        if cached_script:
+            logger.info(f"[{self.name}] Using cached script for {pipeline_name}")
+            script_content = cached_script
+        else:
+            # 3. Generate and validate transformation script
+            script_content = self._generate_and_validate_script(manifest, sample_data)
+            if not script_content:
+                return {"status": "failed", "error": "Failed to generate valid script after retries"}
+            
+            # Store in cache for future use
+            cache.set(manifest, script_content)
+            logger.info(f"[{self.name}] Script generated and cached for {pipeline_name}")
 
-        # 2. Generate and validate the transformation script (with retries)
-        script_content = self._generate_and_validate_script(manifest, sample_data)
-        if not script_content:
-            return {"status": "failed", "error": "Failed to generate valid script after retries"}
-
-        # 3. Save script to file
-        script_path = f"transform_{pipeline_name}.py"
+        # 4. Save script to file with unique name to prevent race conditions
+        import uuid
+        script_path = f"transform_{pipeline_name}_{uuid.uuid4().hex[:8]}.py"
         with open(script_path, "w") as f:
             f.write(script_content)
 
         logger.info(f"[{self.name}] Generated script saved to {script_path}")
+        
+        # Check dry-run mode
+        if config.dry_run:
+            source_config = manifest.get("source", {})
+            target_config = manifest.get("target", {})
+            logger.info(f"[DRY-RUN] Would execute script: {script_path}")
+            logger.info(f"[DRY-RUN] Script validated successfully (AST + CodeValidator)")
+            logger.info(f"[DRY-RUN] Source: {source_config.get('bucket')}/{source_config.get('path')}")
+            logger.info(f"[DRY-RUN] Target: {target_config.get('bucket')}/{target_config.get('path')}")
+            return {
+                "status": "dry_run_success",
+                "message": "Script validated (not executed)",
+                "script_path": script_path
+            }
         
         # 4. Generate presigned S3 URLs (no credentials exposed to script)
         source = manifest.get("source", {})
@@ -148,9 +174,14 @@ class TransformationSpecialistAgent(AgentRole):
         finally:
             if os.path.exists(script_path):
                 os.remove(script_path)
+                logger.info(f"[{self.name}] Cleaned up temporary script: {script_path}")
     
-    def _get_sample_data(self, source_path: str) -> Optional[str]:
-        """Reads a sample of the first file in the source path."""
+    def _get_sample_data(self, manifest: Dict[str, Any]) -> Optional[str]:
+        """Get sample data from source for LLM context."""
+        source_config = manifest.get("source", {})
+        source_path = source_config.get("path", "")
+        
+        s3_manager = S3Manager()
         files = s3_manager.list_files(source_path)
         if not files:
             return None
@@ -162,9 +193,9 @@ class TransformationSpecialistAgent(AgentRole):
 
         try:
             text = content.decode('utf-8')
-            return text[:5000] # Return first 5KB
+            return text[:config.sample_data_size]  # Configurable sample size
         except UnicodeDecodeError:
-            return str(content)[:5000]
+            return str(content)[:config.sample_data_size]
 
     def _generate_and_validate_script(self, manifest: Dict[str, Any], sample_data: str) -> Optional[str]:
         """Generate script with validation and retry logic."""
@@ -233,17 +264,117 @@ class TransformationSpecialistAgent(AgentRole):
             "   - DO NOT use boto3 or AWS credentials\n"
             "4. Handle errors gracefully (skip bad files and log errors).\n"
             "5. Print summary logs (processed count, error count).\n"
-            "6. The script must be self-contained (import requests, pandas, json - NO boto3 needed).\n"
-            "7. SECURITY: Only use safe imports. DO NOT use os.system, subprocess.Popen, eval, exec, or __import__.\n"
+            f"6. Handle errors and exit with non-zero status code on failure.\n"
+            f"7. SECURITY: Only use safe imports. Do NOT use os.system, subprocess.Popen, eval, exec, or __import__.\n"
+        )
+        
+        # Add schema validation if schema is provided
+        if schema:
+            prompt += (
+                f"\n\n8. SCHEMA VALIDATION (CRITICAL):\n"
+                f"   After transformations, validate that data types match the expected schema:\n"
+                f"   Expected schema: {json.dumps(schema, indent=2)}\n\n"
+                f"   Validation code template:\n"
+                f"   ```python\n"
+                f"   # Validate schema\n"
+                f"   expected_schema = {json.dumps(schema)}\n"
+                f"   actual_dtypes = df.dtypes.astype(str).to_dict()\n"
+                f"   \n"
+                f"   mismatches = []\n"
+                f"   for col, expected_type in expected_schema.items():\n"
+                f"       if col not in df.columns:\n"
+                f"           mismatches.append(f'Missing column: {{col}}')\n"
+                f"       else:\n"
+                f"           actual = str(df[col].dtype)\n"
+                f"           # Map pandas types to schema types\n"
+                f"           if expected_type == 'int' and 'int' not in actual:\n"
+                f"               mismatches.append(f'{{col}}: expected int, got {{actual}}')\n"
+                f"           elif expected_type == 'str' and actual != 'object':\n"
+                f"               mismatches.append(f'{{col}}: expected str, got {{actual}}')\n"
+                f"           elif expected_type == 'float' and 'float' not in actual:\n"
+                f"               mismatches.append(f'{{col}}: expected float, got {{actual}}')\n"
+                f"           elif expected_type.startswith('datetime') and 'datetime' not in actual:\n"
+                f"               mismatches.append(f'{{col}}: expected datetime, got {{actual}}')\n"
+                f"   \n"
+                f"   if mismatches:\n"
+                f"       print(json.dumps({{'error': 'Schema validation failed', 'mismatches': mismatches}}))\n"
+                f"       raise ValueError(f'Schema validation failed: {{mismatches}}')\n"
+                f"   \n"
+                f"   print(json.dumps({{'status': 'success', 'message': 'Schema validation passed'}}))\n"
+                f"   ```\n"
+            )
+        
+        # Add transformation template reference
+        prompt += (
+            f"\n\nTRANSFORMATION TEMPLATE (follow this pattern):\n"
+            f"```python\n"
+            f"import pandas as pd\n"
+            f"import requests\n"
+            f"import os\n"
+            f"import json\n"
+            f"\n"
+            f"S3_DOWNLOAD_URL = os.environ['S3_DOWNLOAD_URL']\n"
+            f"S3_UPLOAD_URL = os.environ['S3_UPLOAD_URL']\n"
+            f"\n"
+            f"# Download data\n"
+            f"response = requests.get(S3_DOWNLOAD_URL, timeout=60)\n"
+            f"response.raise_for_status()\n"
+            f"data = response.json()\n"
+            f"df = pd.DataFrame(data)\n"
+            f"\n"
+            f"# Transform data\n"
+            f"# ... your transformation logic here ...\n"
+            f"\n"
+            f"# Upload to S3\n"
+            f"json_data = df.to_json(orient='records', date_format='iso')\n"
+            f"requests.put(S3_UPLOAD_URL, data=json_data, headers={{'Content-Type': 'application/json'}})\n"
+            f"```\n"
         )
         
         response = self.chat(prompt)
         
-        match = re.search(r"```python\n(.*?)\n```", response, re.DOTALL)
+        return self._extract_code_from_response(response)
+    
+    def _extract_code_from_response(self, response: str) -> Optional[str]:
+        """Extract Python code from LLM response with validation."""
+        # Try to find code block with ```python
+        pattern = r"```python\s*\n(.*?)\n```"
+        match = re.search(pattern, response, re.DOTALL)
+        
         if match:
-            return match.group(1)
-
-        if "import pandas" in response:
-             return response.replace("```python", "").replace("```", "")
-
+            code = match.group(1).strip()
+            if self._validate_syntax(code):
+                return code
+            logger.warning("Code block found but has syntax errors")
+        
+        # Fallback: try generic code block
+        pattern = r"```\s*\n(.*?)\n```"
+        match = re.search(pattern, response, re.DOTALL)
+        
+        if match:
+            code = match.group(1).strip()
+            if self._validate_syntax(code):
+                return code
+            logger.warning("Generic code block found but has syntax errors")
+        
+        # Last resort: return entire response if it looks like code
+        if "import" in response or "def " in response:
+            code = response.strip()
+            if self._validate_syntax(code):
+                return code
+        
+        logger.error("No valid Python code block found in LLM response")
         return None
+    
+    def _validate_syntax(self, code: str) -> bool:
+        """Validate Python syntax using AST parsing."""
+        try:
+            ast.parse(code)
+            logger.debug("Code syntax validation: PASSED")
+            return True
+        except SyntaxError as e:
+            logger.error(f"Syntax validation failed: {e.msg} at line {e.lineno}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error during syntax validation: {e}")
+            return False

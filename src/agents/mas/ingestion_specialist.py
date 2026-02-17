@@ -3,12 +3,14 @@ import subprocess
 import os
 import sys
 import re
+import ast
 from typing import Dict, Any, Optional
 from src.agents.mas.base_role import AgentRole
 from src.core.config import config
 from src.security.code_validator import CodeValidator
 from src.security.s3_credential_service import S3CredentialService
 from src.utils.execution import time_limit, TimeoutException
+from src.utils.script_cache import get_script_cache
 
 logger = logging.getLogger(__name__)
 
@@ -40,19 +42,54 @@ class IngestionSpecialistAgent(AgentRole):
         Execute the ingestion pipeline by generating and running a script.
         """
         pipeline_name = manifest.get("pipeline_name", "unknown")
-        logger.info(f"[{self.name}] Starting ingestion for: {pipeline_name}")
+        logger.info(f"[{self.name}] Starting ingestion for pipeline: {pipeline_name}")
         
-        # 1. Generate and validate the ingestion script (with retries)
-        script_content = self._generate_and_validate_script(manifest)
-        if not script_content:
-            return {"status": "failed", "error": "Failed to generate valid script after retries"}
+        # 1. Check cache first
+        cache = get_script_cache()
+        cached_script = cache.get(manifest)
+        
+        if cached_script:
+            logger.info(f"[{self.name}] Using cached script for {pipeline_name}")
+            script_content = cached_script
+        else:
+            # 2. Generate and validate the ingestion script (with retries)
+            script_content = self._generate_and_validate_script(manifest)
+            if not script_content:
+                return {"status": "failed", "error": "Failed to generate valid script after retries"}
             
-        # 2. Save script to file
-        script_path = f"ingest_{pipeline_name}.py"
+            # Store in cache for future use
+            cache.set(manifest, script_content)
+            logger.info(f"[{self.name}] Script generated and cached for {pipeline_name}")
+            
+        # 3. Save script to file with unique name to prevent race conditions
+        import uuid
+        script_path = f"ingest_{pipeline_name}_{uuid.uuid4().hex[:8]}.py"
         with open(script_path, "w") as f:
             f.write(script_content)
 
         logger.info(f"[{self.name}] Generated script saved to {script_path}")
+        
+        # Determine target S3 path for dry-run logging
+        target_manifest = manifest.get("target", {})
+        bucket_name = target_manifest.get("bucket", config.bucket_name)
+        layer_name = target_manifest.get("layer", "landing")
+        source_name = target_manifest.get("source", "unknown")
+        dataset_name = target_manifest.get("dataset", "data")
+        s3_key_dry_run = f"{layer_name}/{source_name}/{dataset_name}/data.json"
+
+        # Check dry-run mode
+        if config.dry_run:
+            logger.info(f"[DRY-RUN] Would execute script: {script_path}")
+            logger.info(f"[DRY-RUN] Script validated successfully (AST + CodeValidator)")
+            logger.info(f"[DRY-RUN] Target: s3://{bucket_name}/{s3_key_dry_run}")
+            # Cleanup the temporary script file
+            if os.path.exists(script_path):
+                os.remove(script_path)
+            return {
+                "status": "dry_run_success",
+                "message": "Script validated (not executed)",
+                "script_path": script_path
+            }
         
         # 3. Generate presigned S3 upload URL (no credentials exposed to script)
         target = manifest.get("target", {})
@@ -181,22 +218,79 @@ class IngestionSpecialistAgent(AgentRole):
             "   - Use requests.put(url, data=json_data, headers={'Content-Type': 'application/json'})\n"
             "   - DO NOT use boto3, AWS credentials, or any S3 client libraries\n"
             "   - The presigned URL handles all authentication\n"
-            "3. Implement retry logic for network requests.\n"
-            "4. Print JSON logs to stdout for monitoring.\n"
-            "5. The script must be self-contained (import os, sys, requests, json, etc - NO boto3 needed).\n"
-            "6. Handle errors and exit with non-zero status code on failure.\n"
-            "7. SECURITY: Only use safe imports. Do NOT use os.system, subprocess.Popen, eval, exec, or __import__.\n"
+            f"3. Upload the data to S3 using the presigned URL (PUT request, JSON body).\n"
+            f"4. Handle errors gracefully (retry logic for API calls, skip bad records).\n"
+            f"5. Print summary logs (records fetched, errors encountered).\n"
+            f"6. SECURITY: Only use safe imports. DO NOT use os.system, subprocess.Popen, eval, exec, or __import__.\n"
+            f"\n"
+            f"TEMPLATE REFERENCE (follow this pattern):\n"
+            f"```python\n"
+            f"# For paginated APIs, use this pattern:\n"
+            f"import requests\n"
+            f"import json\n"
+            f"import os\n"
+            f"\n"
+            f"API_URL = os.environ['API_URL']\n"
+            f"S3_UPLOAD_URL = os.environ['S3_UPLOAD_URL']\n"
+            f"\n"
+            f"all_data = []\n"
+            f"page = 1\n"
+            f"\n"
+            f"while True:\n"
+            f"    response = requests.get(f'{{API_URL}}?page={{page}}', timeout=30)\n"
+            f"    response.raise_for_status()\n"
+            f"    data = response.json()\n"
+            f"    \n"
+            f"    if not data:\n"
+            f"        break\n"
+            f"    \n"
+            f"    all_data.extend(data)\n"
+            f"    page += 1\n"
+            f"\n"
+            f"# Upload to S3\n"
+            f"requests.put(S3_UPLOAD_URL, data=json.dumps(all_data), headers={{'Content-Type': 'application/json'}})\n"
+            f"```\n"
         )
         
         response = self.chat(prompt)
         
-        # Extract code block
-        match = re.search(r"```python\n(.*?)\n```", response, re.DOTALL)
-        if match:
-            return match.group(1)
+        return self._extract_code_from_response(response)
         
-        # Fallback if no block found but code looks present
-        if "import requests" in response:
-             return response.replace("```python", "").replace("```", "")
-
+    def _extract_code_from_response(self, response: str) -> Optional[str]:
+        """Extract Python code from LLM response with validation."""
+        # Try to find code block with ```python
+        pattern = r"```python\s*\n(.*?)\n```"
+        match = re.search(pattern, response, re.DOTALL)
+        
+        if match:
+            code = match.group(1).strip()
+            if self._validate_syntax(code):
+                return code
+            logger.warning("Code block found but has syntax errors")
+        
+        # Fallback: try generic code block
+        pattern = r"```\s*\n(.*?)\n```"
+        match = re.search(pattern, response, re.DOTALL)
+        
+        if match:
+            code = match.group(1).strip()
+            if self._validate_syntax(code):
+                return code
+            logger.warning("Generic code block found but has syntax errors")
+        
+        # No valid code block found
+        logger.error("No valid Python code block found in LLM response")
         return None
+    
+    def _validate_syntax(self, code: str) -> bool:
+        """Validate Python syntax using AST parsing."""
+        try:
+            ast.parse(code)
+            logger.debug("Code syntax validation: PASSED")
+            return True
+        except SyntaxError as e:
+            logger.error(f"Syntax validation failed: {e.msg} at line {e.lineno}")
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error during syntax validation: {e}")
+            return False

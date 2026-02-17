@@ -23,6 +23,9 @@ class AppConfig(BaseModel):
     llm_model: str = "gpt-3.5-turbo"
     script_execution_timeout: int = 300
     presigned_url_expiration: int = 3600  # 1 hour default
+    sample_data_size: int = 5000  # Sample size for data extraction in transformation scripts
+    dry_run: bool = False  # Dry-run mode (validate scripts without executing)
+    structured_logging: bool = False  # Use JSON structured logging
     
     @property
     def is_dev(self) -> bool:
@@ -58,6 +61,9 @@ def get_config() -> AppConfig:
         llm_model=os.getenv("LLM_MODEL", "gpt-3.5-turbo"),
         script_execution_timeout=int(os.getenv("SCRIPT_EXECUTION_TIMEOUT", "300")),
         presigned_url_expiration=int(os.getenv("PRESIGNED_URL_EXPIRATION", "3600")),
+        sample_data_size=int(os.getenv("SAMPLE_DATA_SIZE", "5000")),
+        dry_run=os.getenv("DRY_RUN", "false").lower() == "true",
+        structured_logging=os.getenv("STRUCTURED_LOGGING", "false").lower() == "true",
     )
 
 # Singleton instance

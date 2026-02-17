@@ -9,6 +9,7 @@ from src.agents.mas.base_role import AgentRole
 from src.core.s3_manager import s3_manager
 from src.core.config import config
 from src.security.code_validator import CodeValidator
+from src.security.s3_credential_service import S3CredentialService
 from src.utils.execution import time_limit, TimeoutException
 
 logger = logging.getLogger(__name__)
@@ -67,14 +68,53 @@ class TransformationSpecialistAgent(AgentRole):
 
         logger.info(f"[{self.name}] Generated script saved to {script_path}")
         
-        # 4. Execute the script
+        # 4. Generate presigned S3 URLs (no credentials exposed to script)
+        source = manifest.get("source", {})
+        target = manifest.get("target", {})
+        
+        source_bucket = source.get("bucket", config.bucket_name)
+        source_path = source.get("path", "")
+        target_bucket = target.get("bucket", config.bucket_name)
+        target_path = target.get("path", "")
+        
+        # Create S3 credential service
+        s3_service = S3CredentialService(
+            endpoint_url=config.ovh_endpoint,
+            region_name=config.ovh_region,
+            access_key=config.ovh_access_key,
+            secret_key=config.ovh_secret_key,
+            default_expiration=config.presigned_url_expiration
+        )
+        
+        # Generate presigned URLs for download and upload
+        presigned_download_url = s3_service.generate_presigned_download_url(
+            bucket=source_bucket,
+            key=source_path,
+            expiration=config.script_execution_timeout + 300  # Timeout + 5min buffer
+        )
+        
+        presigned_upload_url = s3_service.generate_presigned_upload_url(
+            bucket=target_bucket,
+            key=target_path,
+            expiration=config.script_execution_timeout + 300
+        )
+        
+        logger.info(
+            f"[{self.name}] Generated presigned URLs:\n"
+            f"  Download: s3://{source_bucket}/{source_path}\n"
+            f"  Upload: s3://{target_bucket}/{target_path}"
+        )
+        
+        # 5. Execute the script with presigned URLs (NO CREDENTIALS)
         env_vars = os.environ.copy()
         env_vars.update({
             "PYTHONPATH": os.getcwd(),
-            "OVH_ENDPOINT": config.ovh_endpoint,
-            "OVH_REGION": config.ovh_region,
-            "OVH_ACCESS_KEY": config.ovh_access_key,
-            "OVH_SECRET_KEY": config.ovh_secret_key,
+            "S3_DOWNLOAD_URL": presigned_download_url,  # ✅ Presigned URL, not credentials
+            "S3_UPLOAD_URL": presigned_upload_url,      # ✅ Presigned URL, not credentials
+            "SOURCE_BUCKET": source_bucket,
+            "SOURCE_PATH": source_path,
+            "TARGET_BUCKET": target_bucket,
+            "TARGET_PATH": target_path,
         })
         
         try:
@@ -176,29 +216,25 @@ class TransformationSpecialistAgent(AgentRole):
             f"- Bucket: {source.get('bucket', config.bucket_name)}\n"
             f"TARGET S3:\n"
             f"- Path Prefix: {target.get('path')}\n"
-            f"- Bucket: {target.get('bucket', config.bucket_name)}\n"
-            f"S3 CONFIG:\n"
-            f"- Endpoint: Read from env OVH_ENDPOINT\n"
-            f"- Region: Read from env OVH_REGION\n"
-            f"- Access Key: Read from env OVH_ACCESS_KEY\n"
-            f"- Secret Key: Read from env OVH_SECRET_KEY\n\n"
+            f"- Bucket: {target.get('bucket', config.bucket_name)}\n\n"
             f"TRANSFORMATION INSTRUCTION: {ai_config.get('instruction')}\n"
             f"TARGET SCHEMA: {json.dumps(ai_config.get('schema'), indent=2)}\n\n"
             f"SAMPLE SOURCE DATA (First 5KB):\n{sample_data}\n\n"
             "REQUIREMENTS:\n"
-            "1. Use `boto3` to list all files in the source prefix.\n"
-            "2. For each file:\n"
-            "   a. Download it locally (or read into memory).\n"
-            "   b. Load into a Pandas DataFrame (infer format from extension or content).\n"
-            "   c. Apply transformations to match the schema and instruction.\n"
-            "   d. Convert data types if necessary (e.g., date strings to datetime objects).\n"
-            "   e. Write the result to the target path (change extension to .parquet or .json).\n"
-            "   f. Use `boto3` to upload the result.\n"
-            "   - Initialize boto3 client using `os.environ` variables: OVH_ENDPOINT, OVH_REGION, OVH_ACCESS_KEY, OVH_SECRET_KEY.\n"
-            "3. Handle errors gracefully (skip bad files and log errors).\n"
-            "4. Print summary logs (processed count, error count).\n"
-            "5. The script must be self-contained.\n"
-            "6. SECURITY: Only use safe imports. Do NOT use os.system, subprocess.Popen, eval, exec, or __import__.\n"
+            "1. Download source data using PRESIGNED URL (NO boto3 needed):\n"
+            "   - Use requests.get(os.environ['S3_DOWNLOAD_URL']) to download\n"
+            "   - DO NOT use boto3 or AWS credentials\n"
+            "2. For each file/record:\n"
+            "   a. Load into a Pandas DataFrame (infer format from extension or content).\n"
+            "   b. Apply transformations to match the schema and instruction.\n"
+            "   c. Convert data types if necessary (e.g., date strings to datetime objects).\n"
+            "3. Upload result using PRESIGNED URL:\n"
+            "   - Use requests.put(os.environ['S3_UPLOAD_URL'], data=result, headers={'Content-Type': 'application/json'})\n"
+            "   - DO NOT use boto3 or AWS credentials\n"
+            "4. Handle errors gracefully (skip bad files and log errors).\n"
+            "5. Print summary logs (processed count, error count).\n"
+            "6. The script must be self-contained (import requests, pandas, json - NO boto3 needed).\n"
+            "7. SECURITY: Only use safe imports. DO NOT use os.system, subprocess.Popen, eval, exec, or __import__.\n"
         )
         
         response = self.chat(prompt)

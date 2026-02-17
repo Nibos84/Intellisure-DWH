@@ -7,8 +7,9 @@ The Agentic Data Engineering System implements multiple layers of security to pr
 **Security Layers:**
 1. **Code Validation** - Prevents execution of dangerous LLM-generated scripts
 2. **Input Validation** - Validates manifest configurations before execution
-3. **Secrets Management** (Planned) - Secure credential storage and rotation
-4. **Rate Limiting** (Planned) - Prevents API abuse and cost overruns
+3. **Secrets Management** - Secure credential handling via S3 pre-signed URLs
+4. **Resource Exhaustion Protection** - Execution timeouts to prevent runaway scripts
+5. **Rate Limiting** (Planned) - Prevents API abuse and cost overruns
 
 ---
 
@@ -208,6 +209,110 @@ pytest tests/test_execution_timeouts.py -v
 - `subprocess.run(timeout=...)` is the **primary** cross-platform timeout
 - `signal.SIGALRM` (Unix/Linux) provides **additional** OS-level safety if subprocess timeout fails
 - Both layers ensure scripts cannot run indefinitely (Unix/Linux gets best protection)
+
+---
+
+## Secrets Management
+
+### Purpose
+
+Prevent credential exposure in LLM-generated scripts by using S3 pre-signed URLs instead of passing raw credentials.
+
+### Problem Statement
+
+**Before:** Credentials (`OVH_ACCESS_KEY`, `OVH_SECRET_KEY`) were passed to generated scripts via environment variables. This created security risks:
+- Scripts could log credentials to stdout/stderr
+- Scripts could exfiltrate credentials to external services
+- Scripts could store credentials in files
+- Credentials visible in process listings
+
+**After:** Scripts receive time-limited pre-signed URLs for specific S3 operations. No credentials are exposed.
+
+### Implementation
+
+**Module:** `src/security/s3_credential_service.py`
+
+The `S3CredentialService` generates pre-signed URLs for S3 operations without exposing raw credentials to generated scripts.
+
+#### Key Features
+
+✅ **No Credential Exposure:** Scripts never see `OVH_ACCESS_KEY` or `OVH_SECRET_KEY`  
+✅ **Time-Limited Access:** URLs expire automatically (default: 1 hour, configurable)  
+✅ **Operation-Specific:** Upload URLs can't download, download URLs can't upload  
+✅ **Audit Trail:** All URL generation is logged with timestamps  
+✅ **Principle of Least Privilege:** Scripts only get access to specific S3 objects
+
+### Configuration
+
+**Environment Variable:**
+```bash
+# S3 Pre-Signed URL Expiration (seconds)
+PRESIGNED_URL_EXPIRATION=3600  # Default: 1 hour
+```
+
+### Usage Example
+
+#### Ingestion Specialist
+
+**Before (❌ Credentials Exposed):**
+```python
+env_vars.update({
+    "OVH_ACCESS_KEY": config.ovh_access_key,  # ❌ Exposed
+    "OVH_SECRET_KEY": config.ovh_secret_key,  # ❌ Exposed
+})
+```
+
+**After (✅ Presigned URLs):**
+```python
+from src.security.s3_credential_service import S3CredentialService
+
+s3_service = S3CredentialService(
+    endpoint_url=config.ovh_endpoint,
+    region_name=config.ovh_region,
+    access_key=config.ovh_access_key,  # Kept secure in service
+    secret_key=config.ovh_secret_key,  # Kept secure in service
+)
+
+presigned_url = s3_service.generate_presigned_upload_url(
+    bucket="my-bucket",
+    key="landing/api/data.json",
+    expiration=config.script_execution_timeout + 300
+)
+
+env_vars.update({
+    "S3_UPLOAD_URL": presigned_url,  # ✅ Time-limited URL
+})
+```
+
+**Generated Script (uses requests, not boto3):**
+```python
+import requests
+import os
+
+upload_url = os.environ['S3_UPLOAD_URL']
+response = requests.put(
+    upload_url,
+    data=json_data,
+    headers={'Content-Type': 'application/json'}
+)
+```
+
+### Security Benefits
+
+| Aspect | Before | After |
+|--------|--------|-------|
+| **Credential Visibility** | ❌ Visible in env vars | ✅ Hidden in service |
+| **Script Access** | ❌ Full S3 access | ✅ Single object only |
+| **Time Limit** | ❌ Permanent credentials | ✅ URLs expire automatically |
+| **Exfiltration Risk** | ❌ High | ✅ Low (time-limited) |
+
+### Limitations
+
+⚠️ **URL Expiration:** Scripts must complete before URL expires (default: 1 hour)  
+⚠️ **Single Object:** Pre-signed URLs work for single objects, not batch operations  
+⚠️ **No List Operations:** Can't list S3 buckets with pre-signed URLs
+
+**Testing:** `tests/test_s3_credential_service.py`
 
 ---
 

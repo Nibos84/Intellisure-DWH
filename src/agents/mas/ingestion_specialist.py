@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional
 from src.agents.mas.base_role import AgentRole
 from src.core.config import config
 from src.security.code_validator import CodeValidator
+from src.security.s3_credential_service import S3CredentialService
 from src.utils.execution import time_limit, TimeoutException
 
 logger = logging.getLogger(__name__)
@@ -53,14 +54,39 @@ class IngestionSpecialistAgent(AgentRole):
 
         logger.info(f"[{self.name}] Generated script saved to {script_path}")
         
-        # 3. Execute the script with environment variables for secrets
+        # 3. Generate presigned S3 upload URL (no credentials exposed to script)
+        target = manifest.get("target", {})
+        bucket = target.get("bucket", config.bucket_name)
+        layer = target.get("layer", "landing")
+        source_name = target.get("source", "unknown")
+        dataset = target.get("dataset", "data")
+        
+        # Create S3 credential service
+        s3_service = S3CredentialService(
+            endpoint_url=config.ovh_endpoint,
+            region_name=config.ovh_region,
+            access_key=config.ovh_access_key,
+            secret_key=config.ovh_secret_key,
+            default_expiration=config.presigned_url_expiration
+        )
+        
+        # Generate presigned upload URL
+        s3_key = f"{layer}/{source_name}/{dataset}/data.json"
+        presigned_upload_url = s3_service.generate_presigned_upload_url(
+            bucket=bucket,
+            key=s3_key,
+            expiration=config.script_execution_timeout + 300  # Timeout + 5min buffer
+        )
+        
+        logger.info(f"[{self.name}] Generated presigned upload URL for s3://{bucket}/{s3_key}")
+        
+        # 4. Execute the script with presigned URL (NO CREDENTIALS)
         env_vars = os.environ.copy()
         env_vars.update({
             "PYTHONPATH": os.getcwd(),
-            "OVH_ENDPOINT": config.ovh_endpoint,
-            "OVH_REGION": config.ovh_region,
-            "OVH_ACCESS_KEY": config.ovh_access_key,
-            "OVH_SECRET_KEY": config.ovh_secret_key,
+            "S3_UPLOAD_URL": presigned_upload_url,  # ✅ Presigned URL, not credentials
+            "S3_BUCKET": bucket,
+            "S3_KEY": s3_key,
         })
 
         try:
@@ -150,12 +176,14 @@ class IngestionSpecialistAgent(AgentRole):
             f"- Base Path: layer={target.get('layer', 'landing')}/source={target.get('source', 'unknown')}/dataset={target.get('dataset', 'data')}\n\n"
             "REQUIREMENTS:\n"
             "1. Use `requests` to fetch data. Handle pagination automatically.\n"
-            "2. Use `boto3` to upload data to S3. \n"
-            "   - Initialize boto3 client using `os.environ` variables: OVH_ENDPOINT, OVH_REGION, OVH_ACCESS_KEY, OVH_SECRET_KEY.\n"
-            "   - Create partitioned path: {Base Path}/year=YYYY/month=MM/day=DD/batch_{timestamp}.json\n"
+            "2. Upload data to S3 using PRESIGNED URL (NO boto3 or credentials needed):\n"
+            "   - Get presigned upload URL from os.environ['S3_UPLOAD_URL']\n"
+            "   - Use requests.put(url, data=json_data, headers={'Content-Type': 'application/json'})\n"
+            "   - DO NOT use boto3, AWS credentials, or any S3 client libraries\n"
+            "   - The presigned URL handles all authentication\n"
             "3. Implement retry logic for network requests.\n"
             "4. Print JSON logs to stdout for monitoring.\n"
-            "5. The script must be self-contained (import os, sys, requests, boto3, etc).\n"
+            "5. The script must be self-contained (import os, sys, requests, json, etc - NO boto3 needed).\n"
             "6. Handle errors and exit with non-zero status code on failure.\n"
             "7. SECURITY: Only use safe imports. Do NOT use os.system, subprocess.Popen, eval, exec, or __import__.\n"
         )
